@@ -3,7 +3,7 @@ import numpy as np
 import mss
 
 HOST = 'fxtun.dev'
-PORT = 10006
+PORT = 10008
 
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.connect((HOST, PORT))
